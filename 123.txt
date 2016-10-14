@@ -1,0 +1,84 @@
+db_name = File.basename(__FILE__, File.extname(__FILE__))
+db_restore_title = "Database #{db_name}"
+db_dmp_file = "#{db_name}.dmp"
+
+
+if File.exist?("#{node['sql_restore']['dmp_file_c']}\\#{db_dmp_file}")
+
+powershell_script "#{db_restore_title}" do
+      code <<-EOH
+      
+$dump_out = SQLCMD -E  -Q "DECLARE @LogFileData TABLE(
+   LogicalName          nvarchar(128),
+    PhysicalName         nvarchar(260),
+    [Type]               char(1),
+    FileGroupName        nvarchar(128),
+    Size                 numeric(20,0),
+    MaxSize              numeric(20,0),
+    FileID               bigint,
+    CreateLSN            numeric(25,0),
+    DropLSN              numeric(25,0),
+    UniqueID             uniqueidentifier,
+    ReadOnlyLSN          numeric(25,0),
+    ReadWriteLSN         numeric(25,0),
+    BackupSizeInBytes    bigint,
+    SourceBlockSize      int,
+    FileGroupID          int,
+    LogGroupGUID         uniqueidentifier,
+    DifferentialBaseLSN  numeric(25,0),
+    DifferentialBaseGUID uniqueidentifier,
+    IsReadOnl            bit,
+    IsPresent            bit,
+    TDEThumbprint        varbinary(32)
+);
+
+insert into @LogFileData
+exec('Restore filelistonly from disk=''#{node['sql_restore']['dmp_file_loc']}/#{db_dmp_file}''')
+select LogicalName + '|' + reverse (substring(REVERSE(PhysicalName),0, PATINDEX('%\\%', REVERSE(PhysicalName)))) 'PhysicalName' from @LogFileData" 
+#echo $dump_out > c:/out2
+ $file_name = $dump_out -replace '(^\s+|\s+$)','' -replace '\s+',' ' | findstr "\|"
+   foreach ($i in $file_name)
+{
+
+$var1 = $i.Split("|")
+$lgl_name = [string]$var1[0]
+$phy_name = [string]$var1[1]
+
+$file_type = ($phy_name).split(".")[-1]
+if (( $file_type -eq "mdf" ) -or ( $file_type -eq "ndf" ))
+{
+$value +=  "move '$lgl_name' to  '#{node['sql_restore']['mdf_restore_loc']}\\$phy_name', "
+}
+elseif( $file_type -eq "ldf" )
+{
+$value +=  "move '$lgl_name' to  '#{node['sql_restore']['ldf_restore_loc']}\\$phy_name', "
+}
+}
+
+$fin_value = $value.Substring(0,$value.Length-2)
+$fin_value += ",REPLACE"
+$datab_name = '#{node['sql_restore']['db1_name']}'
+#echo $datab_name > c:/out
+SQLCMD -E  -Q "Declare @dbname sysname
+                Set @dbname = '#{db_name}'
+              Declare @spid int
+              Select @spid = min(spid) from master.dbo.sysprocesses
+              where dbid = db_id(@dbname)
+              While @spid Is Not Null
+Begin
+              Execute ('Kill ' + @spid)
+              Select @spid = min(spid) from master.dbo.sysprocesses
+              where dbid = db_id(@dbname) and spid > @spid
+End
+go
+RESTORE DATABASE  #{db_name}  FROM DISK='#{node['sql_restore']['dmp_file_loc']}/#{db_dmp_file}' with $fin_value" 
+echo $? > c:/out
+
+EOH
+timeout 600
+only_if  { File.exists?("#{node['sql_restore']['server_check_file']}") }
+
+end
+else
+Chef::Log.warn("#{db_dmp_file}, Dump File not present,")
+end
